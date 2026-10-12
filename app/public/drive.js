@@ -1,0 +1,236 @@
+// Google Drive backup — client-side only, using Google Identity Services' OAuth
+// token client (no server, no client secret). Scope is drive.file: the app can
+// only see/edit files it created itself (or a folder the user explicitly picks
+// via the Google Picker below), never browse the rest of the user's Drive.
+const Drive = (() => {
+  const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+  const FILE_NAME = 'farm-fleet-expenses-backup.json';
+
+  let tokenClient = null;
+  let tokenClientId = null;
+  let pickerApiLoading = null;
+
+  function ensureTokenClient(clientId) {
+    if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+      throw new Error('Google sign-in has not loaded yet — check your internet connection and try again.');
+    }
+    if (!tokenClient || tokenClientId !== clientId) {
+      tokenClientId = clientId;
+      tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: SCOPE,
+        callback: () => {}, // replaced per-request below
+      });
+    }
+    return tokenClient;
+  }
+
+  function requestToken(clientId, interactive) {
+    return new Promise((resolve, reject) => {
+      let client;
+      try { client = ensureTokenClient(clientId); } catch (e) { reject(e); return; }
+      client.callback = (resp) => {
+        if (resp.error) { reject(new Error(resp.error)); return; }
+        resolve(resp.access_token);
+      };
+      try {
+        client.requestAccessToken({ prompt: interactive ? 'consent' : '' });
+      } catch (e) { reject(e); }
+    });
+  }
+
+  async function apiFetch(url, opts) {
+    const res = await fetch(url, opts);
+    if (res.status === 401) throw new Error('UNAUTHORIZED');
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error('Google Drive error (' + res.status + '): ' + text.slice(0, 200));
+    }
+    return res;
+  }
+
+  async function findBackupFile(token, folderId) {
+    const meta = await findBackupFileMeta(token, folderId);
+    return meta ? meta.id : null;
+  }
+
+  async function runFileQuery(token, folderId) {
+    let q = `name='${FILE_NAME}' and trashed=false`;
+    if (folderId) q += ` and '${folderId}' in parents`;
+    const res = await apiFetch('https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) + '&spaces=drive&fields=files(id,name,modifiedTime)', {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+    const data = await res.json();
+    return (data.files && data.files[0]) || null;
+  }
+
+  // Drive 404s an entire files.list (or upload) call if it references a
+  // folder the token can't see — which happens whenever a saved folder gets
+  // deleted, moved out of reach, or (the original cause of this class of
+  // bug) was picked before the Cloud project's app id/project number was
+  // configured. Rather than let that permanently lock the app out, fall back
+  // once with no folder and flag it so the caller can drop the stale folder.
+  // Critically, this must only fire for that *specific* error — Drive always
+  // names the missing id in the 404 body — and never for anything else (an
+  // expired token, a network blip, a rate limit): treating every unrelated
+  // failure as "the folder is gone" would wipe a perfectly good folder choice
+  // on any transient hiccup, including on every ordinary page reload.
+  function isFolderNotFoundError(e, folderId) {
+    return /Google Drive error \(404\)/.test(e.message) && e.message.indexOf(folderId) !== -1;
+  }
+  let folderIdInvalidFlag = false;
+  async function findBackupFileMeta(token, folderId) {
+    if (!folderId) return runFileQuery(token, null);
+    try {
+      return await runFileQuery(token, folderId);
+    } catch (e) {
+      if (!isFolderNotFoundError(e, folderId)) throw e;
+      folderIdInvalidFlag = true;
+      return runFileQuery(token, null);
+    }
+  }
+  function consumeFolderIdInvalid() {
+    const v = folderIdInvalidFlag;
+    folderIdInvalidFlag = false;
+    return v;
+  }
+
+  async function downloadFile(token, fileId) {
+    const res = await apiFetch('https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media', {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+    return res.json();
+  }
+
+  async function uploadNewFile(token, content, folderId) {
+    const boundary = 'ffe_' + Math.random().toString(36).slice(2);
+    const metadata = { name: FILE_NAME, mimeType: 'application/json' };
+    if (folderId) metadata.parents = [folderId];
+    const body =
+      '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) + '\r\n' +
+      '--' + boundary + '\r\nContent-Type: application/json\r\n\r\n' + content + '\r\n' +
+      '--' + boundary + '--';
+    const res = await apiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'multipart/related; boundary=' + boundary },
+      body,
+    });
+    const data = await res.json();
+    return data.id;
+  }
+
+  // Setting `parents: [folderId]` on the upload itself 404s just like the
+  // search does when that folder isn't reachable — and, in practice, this is
+  // the call that actually 404s for a stale folder (the search alone can
+  // come back merely empty rather than erroring). Same recovery as above:
+  // retry once with no parent (creating at "My Drive" root) and flag it.
+  async function createBackupFile(token, content, folderId) {
+    if (!folderId) return uploadNewFile(token, content, null);
+    try {
+      return await uploadNewFile(token, content, folderId);
+    } catch (e) {
+      if (!isFolderNotFoundError(e, folderId)) throw e;
+      folderIdInvalidFlag = true;
+      return uploadNewFile(token, content, null);
+    }
+  }
+
+  async function updateBackupFile(token, fileId, content) {
+    await apiFetch('https://www.googleapis.com/upload/drive/v3/files/' + fileId + '?uploadType=media', {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: content,
+    });
+  }
+
+  // Uploads `payload` to a single, stable backup file in the signed-in user's
+  // Drive (inside `folderId` if given, else "My Drive" root), creating it on
+  // the first run and overwriting it after that. `existingFileId` (if known)
+  // skips the lookup. `interactive` forces the Google consent screen even if
+  // a prior grant may have expired silently.
+  async function backup(clientId, existingFileId, payload, interactive, folderId) {
+    const token = await requestToken(clientId, interactive);
+    const content = JSON.stringify(payload, null, 2);
+    if (existingFileId) {
+      try {
+        await updateBackupFile(token, existingFileId, content);
+        return existingFileId;
+      } catch (e) {
+        if (e.message === 'UNAUTHORIZED') throw e;
+        existingFileId = null; // e.g. file was deleted — fall through to recreate
+      }
+    }
+    const foundId = await findBackupFile(token, folderId);
+    if (folderIdInvalidFlag) folderId = null; // stale folder — create at "My Drive" root instead
+    if (foundId) { await updateBackupFile(token, foundId, content); return foundId; }
+    return createBackupFile(token, content, folderId);
+  }
+
+  // Looks for an existing backup file without touching local data — used to
+  // check "is there already something in Drive?" before ever overwriting it.
+  // Resolves to {id, name, modifiedTime} or null.
+  async function checkBackup(clientId, folderId, interactive) {
+    const token = await requestToken(clientId, interactive);
+    return findBackupFileMeta(token, folderId);
+  }
+
+  // Downloads and parses the backup file's JSON content.
+  async function restore(clientId, fileId, interactive) {
+    const token = await requestToken(clientId, interactive);
+    return downloadFile(token, fileId);
+  }
+
+  function loadPickerApi() {
+    if (window.google && window.google.picker) return Promise.resolve();
+    if (pickerApiLoading) return pickerApiLoading;
+    pickerApiLoading = new Promise((resolve, reject) => {
+      if (!window.gapi) { reject(new Error('The Google API loader has not loaded yet — check your internet connection and try again.')); return; }
+      window.gapi.load('picker', { callback: resolve, onerror: () => reject(new Error('Could not load the Google folder picker.')) });
+    });
+    return pickerApiLoading;
+  }
+
+  // Opens Google's own folder picker so the user can choose a destination
+  // folder in their Drive without the app ever listing their files itself.
+  // Resolves to {id, name}, or null if the user cancels.
+  //
+  // `appId` (the Cloud project *number*, not the project ID or OAuth client
+  // ID) is required for the drive.file scope to actually register access to
+  // a folder the app didn't create — without it, Picker still lets you click
+  // a folder, but Drive never grants the token visibility into it, and every
+  // later request against that folder ID comes back 404 "File not found".
+  async function pickFolder(clientId, apiKey, appId, interactive) {
+    if (!apiKey) throw new Error('Add a Google API key first (see Settings for setup steps).');
+    if (!appId) throw new Error('Add your Google Cloud project number first (see Settings for setup steps).');
+    const token = await requestToken(clientId, interactive);
+    await loadPickerApi();
+    return new Promise((resolve, reject) => {
+      try {
+        const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+          .setSelectFolderEnabled(true)
+          .setIncludeFolders(true)
+          .setMimeTypes('application/vnd.google-apps.folder');
+        const picker = new google.picker.PickerBuilder()
+          .setTitle('Choose a backup folder')
+          .setAppId(appId)
+          .addView(view)
+          .setOAuthToken(token)
+          .setDeveloperKey(apiKey)
+          .setCallback((data) => {
+            if (data.action === google.picker.Action.PICKED) {
+              const doc = data.docs[0];
+              resolve({ id: doc.id, name: doc.name });
+            } else if (data.action === google.picker.Action.CANCEL) {
+              resolve(null);
+            }
+          })
+          .build();
+        picker.setVisible(true);
+      } catch (e) { reject(e); }
+    });
+  }
+
+  function reset() { tokenClient = null; tokenClientId = null; }
+
+  return { backup, checkBackup, restore, pickFolder, reset, consumeFolderIdInvalid };
+})();
