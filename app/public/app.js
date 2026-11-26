@@ -88,6 +88,9 @@
     // on/off switch (saved with the data); inboxAi is whether the script reports
     // having a Claude API key (null until the first inbox check answers).
     aiReading: false, inboxAi: null,
+
+    openGuide: null, // which Settings setup guide is expanded ('storage' | 'inbox')
+    scriptCopyStatus: '',
   };
 
   // ---------------------------------------------------------------- data store
@@ -2087,10 +2090,8 @@
 
   function renderInboxSettings() {
     const connected = state.inboxUrl && state.inboxKey;
-    const setupInfo = `Uses a small Google Apps Script (app/email-inbox/Code.gs in the project) running in the
-      Google account invoices are emailed to. Paste it into script.google.com, run "setup", then deploy it as a
-      web app (Execute as: Me, Who has access: Anyone). The full steps are in the project README under
-      "Emailing invoices in".`;
+    const setupInfo = `Uses a small Google Apps Script running in the Google account invoices are emailed to.
+      The step-by-step setup guide is at the bottom of this page.`;
     return `
       <div class="card" style="padding:16px 20px;">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;">
@@ -2118,6 +2119,135 @@
     `;
   }
 
+  // ---------------------------------------------------------------- setup guides
+  // Step-by-step instructions shown at the bottom of Settings → Storage and
+  // Settings → Email & AI, collapsed until opened.
+
+  const GUIDE_LIST = 'margin:8px 0 16px;padding-left:22px;line-height:1.6;font-size:14px;';
+  const GUIDE_H = 'font-size:16px;margin:20px 0 4px;';
+  const GUIDE_NOTE = 'font-size:13px;color:var(--color-neutral-700);line-height:1.5;margin:0 0 12px;';
+  const extLink = (href, label) => `<a href="${href}" target="_blank" rel="noopener">${label}</a>`;
+  const code = (t) => `<code style="background:var(--color-neutral-100);padding:1px 5px;border-radius:4px;font-size:13px;overflow-wrap:anywhere;">${esc(t)}</code>`;
+
+  function setupGuide(id, title, bodyHtml) {
+    const open = state.openGuide === id;
+    return `
+      <div class="card" style="padding:16px 20px;margin-top:16px;">
+        <button class="btn btn-ghost" data-action="toggleGuide" data-guide="${id}" aria-expanded="${open}" style="padding:0;display:flex;align-items:center;gap:8px;align-self:flex-start;text-align:left;">
+          <span style="display:inline-block;transition:transform .15s;transform:rotate(${open ? 90 : 0}deg);">▸</span>
+          ${esc(title)}
+        </button>
+        ${open ? `<div style="margin-top:8px;">${bodyHtml}</div>` : ''}
+      </div>
+    `;
+  }
+
+  function renderStorageGuide() {
+    const origin = location.origin;
+    return setupGuide('storage', 'Setup guide: where your data lives', `
+      <p style="${GUIDE_NOTE}">Pick one place for your data. <strong>Google Drive</strong> works on every device and lets several
+        people share the same data. <strong>Local</strong> saves to a folder on this computer only (Chrome or Edge). Until one
+        is picked, nothing is saved when you close the page.</p>
+
+      <h3 style="${GUIDE_H}">Google Drive (one-time setup, about 15 minutes)</h3>
+      <ol style="${GUIDE_LIST}">
+        <li>Sign in to the Google account the data should live in, and open the
+          ${extLink('https://console.cloud.google.com/projectcreate', 'Google Cloud Console')}. Create a new project
+          (any name, e.g. "Fleet expenses").</li>
+        <li>Go to ${extLink('https://console.cloud.google.com/apis/library/drive.googleapis.com', 'APIs &amp; Services → Library → Google Drive API')}
+          and click <strong>Enable</strong>.</li>
+        <li>Go to ${extLink('https://console.cloud.google.com/auth/overview', 'Google Auth Platform')} (also called
+          <em>OAuth consent screen</em>) and click <strong>Get started</strong>. Give it an app name and your email, choose
+          <strong>External</strong>, and finish. Then under <strong>Audience → Test users</strong>, add the email of
+          everyone who will sign in.</li>
+        <li>Go to ${extLink('https://console.cloud.google.com/apis/credentials', 'Credentials')} →
+          <strong>Create credentials → OAuth client ID</strong>. Application type: <strong>Web application</strong>.
+          Under <strong>Authorized JavaScript origins</strong>, add exactly ${code(origin)} (no slash at the end). Click
+          <strong>Create</strong> and copy the <strong>Client ID</strong>.</li>
+        <li>Back here, click <strong>Google Drive</strong> above, paste the Client ID, and click <strong>Connect</strong>.
+          Sign in with the same Google account. Google will warn the app isn't verified, because it's your own private
+          project: click <strong>Continue</strong>.</li>
+      </ol>
+      <p style="${GUIDE_NOTE}">The app can only see the one file it creates (${code('farm-fleet-expenses-backup.json')}),
+        never the rest of your Drive. Every device that connects with the same Google account and Client ID sees the same data.</p>
+
+      <h3 style="${GUIDE_H}">Optional: choose which Drive folder it saves in</h3>
+      <ol style="${GUIDE_LIST}">
+        <li>In the Library, search for <strong>Picker</strong> and enable the <strong>Picker API</strong>.</li>
+        <li>On the Credentials page, <strong>Create credentials → API key</strong>. Edit it: under
+          <strong>API restrictions</strong> allow <strong>Picker API</strong> and <strong>Google Drive API</strong>; under
+          <strong>Website restrictions</strong> add ${code(origin + '/*')}.</li>
+        <li>Find your <strong>project number</strong> on the Cloud Console dashboard (a long number; not the project ID).</li>
+        <li>Paste the API key and project number into the Google Drive fields above. A <strong>Select folder</strong>
+          button then appears. Without these, the file goes in the top level of My Drive.</li>
+      </ol>
+
+      <h3 style="${GUIDE_H}">Local folder</h3>
+      <ol style="${GUIDE_LIST}">
+        <li>Use Chrome or Edge on a computer (phones and other browsers can't do this).</li>
+        <li>Click <strong>Local</strong> above, then <strong>Select folder</strong>, and pick or create a folder. Allow the
+          browser to save changes when it asks.</li>
+        <li>The browser may ask you to reconnect after a while. Click <strong>Select folder</strong> and pick the same folder again.</li>
+      </ol>
+      <p style="${GUIDE_NOTE}">Whichever you pick, changes save automatically every 15 seconds. <strong>Download JSON</strong>
+        at the top of this page makes an extra backup copy any time.</p>
+    `);
+  }
+
+  function renderInboxGuide() {
+    const origin = location.origin;
+    const scriptUrl = new URL('email-inbox/Code.js', location.href).href;
+    return setupGuide('inbox', 'Setup guide: email inbox and AI reading', `
+      <p style="${GUIDE_NOTE}">Set up a storage location first (Settings → Storage). The connection below is saved with your
+        data, so once it's set up, every device that loads your data is connected too.</p>
+
+      <h3 style="${GUIDE_H}">1. Email inbox (about 5 minutes)</h3>
+      <ol style="${GUIDE_LIST}">
+        <li>Sign in to the Gmail or Google Workspace account invoices will be emailed to, and go to
+          ${extLink('https://script.google.com/home/projects/create', 'script.google.com → New project')}.</li>
+        <li>Delete the sample code. Then copy the script and paste it in:
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0;">
+            <button class="btn btn-secondary" data-action="copyInboxScript">Copy script</button>
+            ${extLink(scriptUrl, 'Open script')}
+            ${state.scriptCopyStatus ? `<span style="font-size:13px;color:var(--color-neutral-700);">${esc(state.scriptCopyStatus)}</span>` : ''}
+          </div>
+          Save the project (give it a name like "Fleet invoice inbox").</li>
+        <li>In the function dropdown at the top, choose <strong>setup</strong> and click <strong>Run</strong>. Approve the
+          permissions. Google will say the app isn't verified, because it's your own script: click
+          <strong>Advanced → Go to … (unsafe)</strong>.</li>
+        <li>Open <strong>Execution log</strong> at the bottom. It shows the <strong>address to email invoices to</strong>
+          (your address with ${code('+invoices')} added) and an <strong>access key</strong>.</li>
+        <li>Click <strong>Deploy → New deployment</strong>. Select type <strong>Web app</strong>. Set
+          <strong>Execute as: Me</strong> and <strong>Who has access: Anyone</strong>, then <strong>Deploy</strong>.
+          Copy the <strong>Web app URL</strong> (it ends in ${code('/exec')}).</li>
+        <li>Paste the URL and access key into the fields above and click <strong>Connect</strong>.</li>
+      </ol>
+      <p style="${GUIDE_NOTE}">Then email or forward any invoice PDF or photo to the +invoices address. It shows up under
+        <strong>Expenses → Email Inbox</strong>, with a count on the Expense button. "Anyone" only means the script doesn't
+        ask for a Google sign-in; every request still needs the access key. On a Google Workspace account, if "Anyone"
+        isn't offered, your admin needs to allow it.</p>
+
+      <h3 style="${GUIDE_H}">2. AI reading (optional)</h3>
+      <ol style="${GUIDE_LIST}">
+        <li>Create an account at ${extLink('https://console.anthropic.com', 'console.anthropic.com')}, add credit, and
+          create an <strong>API key</strong> (Settings → API keys). Expect roughly 5–10¢ per invoice.</li>
+        <li>In the script editor, click <strong>Project Settings</strong> (gear icon) → <strong>Script properties</strong>
+          → <strong>Add script property</strong>. Property: ${code('ANTHROPIC_API_KEY')}; value: your key.
+          <strong>Save</strong>.</li>
+        <li>Here, click <strong>Test connection</strong>, then <strong>Turn on AI reading</strong>.</li>
+      </ol>
+      <p style="${GUIDE_NOTE}">With AI on, each invoice is read by Claude, which suggests the equipment and expense type for
+        every line from your past invoices. Parts you've bought before go to the same machine automatically. Check the
+        suggestions (guesses are outlined in red) and save; each save teaches the next invoice. With AI on, invoice files,
+        your equipment list and recent coding history are sent to Anthropic to be read.</p>
+
+      <h3 style="${GUIDE_H}">Updating the script later</h3>
+      <p style="${GUIDE_NOTE}">When a new version of the app changes the script: paste the new script in, save, then
+        <strong>Deploy → Manage deployments → edit (pencil) → Version: New version → Deploy</strong>. That keeps the same
+        URL. (A <em>new deployment</em> would get a new URL that has to be pasted here again.)</p>
+    `);
+  }
+
   function renderAiSettings() {
     const connected = state.inboxUrl && state.inboxKey;
     const info = `When this is on, uploaded and emailed invoices are sent to Claude (Anthropic's AI) through your
@@ -2132,7 +2262,7 @@
       bodyHtml = `<div style="color:var(--color-neutral-700);font-size:14px;line-height:1.5;">
         The Google script doesn't have a Claude API key yet. In the script editor, open <strong>Project Settings → Script properties</strong>,
         add one named <strong>ANTHROPIC_API_KEY</strong> with your key from console.anthropic.com, then click <strong>Test connection</strong> above.
-        (If you set the script up before AI reading existed, paste in the latest Code.gs and deploy a new version first.)
+        (If you set the script up before AI reading existed, paste in the latest script from the setup guide below and deploy a new version first.)
       </div>`;
     } else {
       bodyHtml = `
@@ -2240,7 +2370,7 @@
     } else if (tab === 'equipment') {
       body = settingsSectionHeader('Equipment', `<button class="btn btn-secondary" data-action="openAddEquipmentModal">+ Add equipment</button>`) + eqBody;
     } else if (tab === 'inbox') {
-      body = settingsSectionHeader('Email inbox') + renderInboxSettings() + renderAiSettings();
+      body = settingsSectionHeader('Email inbox') + renderInboxSettings() + renderAiSettings() + renderInboxGuide();
     } else if (tab === 'suppliers') {
       body = settingsSectionHeader('Suppliers', `<button class="btn btn-secondary" data-action="openSupplierAddModal">+ Add supplier</button>`) + supBody;
     } else {
@@ -2256,6 +2386,7 @@
           ${state.fileRestoreError ? `<div style="color:var(--color-accent-700);font-size:13px;margin-top:8px;">${esc(state.fileRestoreError)}</div>` : ''}
         </div>
         ${renderStorageSection()}
+        ${renderStorageGuide()}
       `;
     }
 
@@ -3008,6 +3139,19 @@
       state.inboxBusy = false;
       render();
     },
+    toggleGuide(e, d) {
+      state.openGuide = state.openGuide === d.guide ? null : d.guide;
+      state.scriptCopyStatus = '';
+      render();
+      if (state.openGuide === 'inbox') loadInboxScript();
+    },
+    copyInboxScript() {
+      if (!inboxScriptText) { state.scriptCopyStatus = 'Still loading — try again in a moment, or use Open script.'; render(); loadInboxScript(); return; }
+      navigator.clipboard.writeText(inboxScriptText).then(
+        () => { state.scriptCopyStatus = 'Copied. Paste it into the script editor.'; render(); },
+        () => { state.scriptCopyStatus = "Couldn't copy here. Use Open script, then select all and copy."; render(); },
+      );
+    },
     toggleAiReading() {
       mutate(() => {
         state.aiReading = !state.aiReading;
@@ -3264,6 +3408,17 @@
   registerCategoryModalActions('categoryEdit', () => ({ get name() { return state.categoryEditDraft; }, set name(v) { state.categoryEditDraft = v; }, get color() { return state.categoryEditColorDraft; }, set color(v) { state.categoryEditColorDraft = v; } }));
 
   Actions.setSettingsTab = (e, d) => { state.settingsTab = d.tab; render(); };
+
+  // Fetched as soon as the email setup guide opens, so "Copy script" can write
+  // to the clipboard straight from the click (browsers refuse after an await).
+  let inboxScriptText = '';
+  async function loadInboxScript() {
+    if (inboxScriptText) return;
+    try {
+      const res = await fetch('email-inbox/Code.js', { cache: 'no-cache' });
+      if (res.ok) inboxScriptText = await res.text();
+    } catch (e) { /* "Open script" still works */ }
+  }
 
   // ---------------------------------------------------------------- coding predictions
   // "Learning" is just the saved history: every invoice line you save with an

@@ -3,7 +3,7 @@
  *
  * Paste this whole file into a new Google Apps Script project (script.google.com)
  * owned by the Gmail / Google Workspace account invoices get emailed to, then follow
- * the steps in app/README.md ("Emailing invoices in"). In short:
+ * the setup guide in the app (Settings → Email & AI → Setup guide). In short:
  *
  *   1. Run `setup` once (pick it in the function dropdown, click Run, approve access).
  *      The execution log prints the address to email invoices to and the access key.

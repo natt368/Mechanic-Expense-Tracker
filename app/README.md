@@ -137,6 +137,8 @@ elsewhere) to close it.
 
 ### Google Drive setup
 
+These steps are also in the app, under **Settings → Storage → Setup guide**.
+
 Entirely client-side (`app/public/drive.js`, using Google Identity Services and the
 Google Picker — no server, no client secret), and needs a one-time setup per Google
 account/Cloud project:
@@ -207,13 +209,14 @@ it's saved, or **Dismiss**ed if it isn't an invoice, it's never offered again, o
 device.
 
 The app is static, so it can't receive email itself. A small Google Apps Script
-(`app/email-inbox/Code.gs`), running in the Google account the invoices are emailed to,
+(`app/public/email-inbox/Code.js`), running in the Google account the invoices are emailed to,
 does that part. It reads matching emails from that Gmail and hands their attachments to
-the app; nothing is copied anywhere else. One-time setup:
+the app; nothing is copied anywhere else. The same steps are in the app, under **Settings → Email & AI →
+Setup guide**, with a button that copies the script. One-time setup:
 
 1. Sign in to the Google account invoices will be emailed to, and go to
    [script.google.com](https://script.google.com) → **New project**.
-2. Delete the sample code, paste in the whole of `app/email-inbox/Code.gs`, and save
+2. Delete the sample code, paste in the whole of `app/public/email-inbox/Code.js`, and save
    (name the project something like "Fleet invoice inbox").
 3. In the function dropdown at the top, pick **setup** and click **Run**. Approve the
    permissions it asks for. Google warns that the app isn't verified, because it's your
