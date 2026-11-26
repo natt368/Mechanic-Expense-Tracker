@@ -75,6 +75,12 @@
 
     localFolderName: '', localLastSavedAt: null, localBusy: false, localMessage: '',
     localNeedsReconnect: false, localFolderChangeConfirming: false,
+
+    // Email inbox (Settings → Email inbox). URL + key are saved with the data, so
+    // every device that loads it is connected too.
+    inboxUrl: '', inboxKey: '', inboxUrlDraft: '', inboxKeyDraft: '',
+    inboxAddress: '', inboxItems: [], inboxLoaded: false, inboxBusy: false, inboxError: '',
+    inboxOpeningId: null, inboxConfirmDismiss: null,
   };
 
   // ---------------------------------------------------------------- data store
@@ -94,6 +100,8 @@
     state.suppliers = [];
     state.invoices = [];
     state.settingsPassword = '1234';
+    state.inboxUrl = '';
+    state.inboxKey = '';
   }
 
   let dataDirty = false;
@@ -114,6 +122,12 @@
     state.invoices = Array.isArray(data.invoices) ? data.invoices : [];
     state.settingsPassword = typeof data.settingsPassword === 'string' && data.settingsPassword ? data.settingsPassword : '1234';
     state.farmName = typeof data.farmName === 'string' ? data.farmName : '';
+    const inbox = data.emailInbox && typeof data.emailInbox === 'object' ? data.emailInbox : {};
+    state.inboxUrl = typeof inbox.url === 'string' ? inbox.url : '';
+    state.inboxKey = typeof inbox.key === 'string' ? inbox.key : '';
+    state.inboxItems = [];
+    state.inboxLoaded = false;
+    if (state.inboxUrl && state.inboxKey) setTimeout(() => refreshInbox(), 0);
     let maxId = 0;
     const scan = (v) => { if (v && typeof v.id === 'number' && v.id > maxId) maxId = v.id; };
     state.categories.forEach(scan);
@@ -496,6 +510,7 @@
       invoices: state.invoices,
       settingsPassword: state.settingsPassword,
       farmName: state.farmName,
+      emailInbox: state.inboxUrl ? { url: state.inboxUrl, key: state.inboxKey } : null,
     };
   }
   function fmt(n) { return '$' + (parseFloat(n) || 0).toFixed(2); }
@@ -691,7 +706,7 @@
         </div>
         <div style="display:flex;gap:10px;align-items:center;">
           ${navBtn('dashboard', 'Dashboard', v === 'dashboard', 'style="font-size:17px;padding:14px 22px;"')}
-          ${navBtn('upload', 'Expense', v === 'upload', 'style="font-size:17px;padding:14px 22px;"')}
+          ${navBtn('upload', 'Expense' + (state.inboxItems.length ? ` <span class="tag tag-accent" title="${state.inboxItems.length} emailed invoice${state.inboxItems.length === 1 ? '' : 's'} waiting" style="margin-left:6px;">${state.inboxItems.length}</span>` : ''), v === 'upload', 'style="font-size:17px;padding:14px 22px;"')}
           ${navBtn('maintenance', 'Maintenance', v === 'maintenance', 'style="font-size:15px;padding:14px 18px;"')}
           ${navBtn('history', 'Equipment', v === 'history' || v === 'detail', 'style="font-size:15px;padding:14px 18px;"')}
           ${navBtn('yearly', 'Reports', v === 'yearly', 'style="font-size:15px;padding:14px 18px;"')}
@@ -846,12 +861,56 @@
         <p class="text-muted" style="max-width:640px;">Upload an invoice to extract line items automatically, enter a single expense by hand, or browse everything you've logged.</p>
         <div style="display:flex;gap:8px;margin-bottom:28px;">
           <button class="btn ${mode === 'upload' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="upload">Upload Invoice</button>
+          <button class="btn ${mode === 'inbox' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="inbox">Email Inbox${state.inboxItems.length ? ` (${state.inboxItems.length})` : ''}</button>
           <button class="btn ${mode === 'manual' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="manual">Manual Expense</button>
           <button class="btn ${mode === 'all' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="all">All Expenses</button>
         </div>
         ${mode === 'all' ? renderAllExpenses() : ''}
         ${mode === 'manual' ? renderManualExpense() : ''}
         ${mode === 'upload' ? renderUploadExpense() : ''}
+        ${mode === 'inbox' ? renderInbox() : ''}
+      </div>
+    `;
+  }
+
+  function renderInbox() {
+    if (!state.inboxUrl || !state.inboxKey) {
+      return `
+        <div class="card" style="padding:16px 20px;max-width:640px;">
+          <div class="card-title" style="margin-bottom:8px;">Email invoices in</div>
+          <div style="color:var(--color-neutral-700);font-size:14px;line-height:1.5;">
+            Not set up yet. Once it's connected in <strong>Settings → Email inbox</strong>, any invoice PDF or
+            photo emailed to your +invoices address shows up here, ready to read and assign to equipment.
+          </div>
+        </div>
+      `;
+    }
+    const items = state.inboxItems;
+    const blocked = !!state.pendingInvoice;
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px;">
+        <div>${state.inboxAddress ? `Email invoices to <strong>${esc(state.inboxAddress)}</strong>` : ''}</div>
+        <button class="btn btn-secondary" data-action="refreshInbox" ${state.inboxBusy ? 'disabled' : ''}>${state.inboxBusy ? 'Checking…' : 'Check for new'}</button>
+      </div>
+      ${state.inboxError ? `<div style="border:2px solid var(--color-accent);padding:12px;margin-bottom:16px;color:var(--color-accent-700);">${esc(state.inboxError)}</div>` : ''}
+      ${blocked && items.length ? `<div style="margin-bottom:16px;font-size:13px;color:var(--color-neutral-700);">Finish saving (or discard) the invoice open in Upload Invoice before opening another one.</div>` : ''}
+      ${!items.length && state.inboxLoaded && !state.inboxError ? `<div class="text-muted">No new emailed invoices.</div>` : ''}
+      <div style="display:flex;flex-direction:column;gap:8px;max-width:900px;">
+        ${items.map((it) => `
+          <div class="card" style="padding:12px 16px;display:flex;flex-direction:row;align-items:center;gap:16px;flex-wrap:wrap;">
+            <div style="flex:1 1 280px;min-width:0;">
+              <div class="card-title" style="font-size:15px;overflow-wrap:anywhere;">${esc(it.fileName)}</div>
+              <div class="card-meta" style="overflow-wrap:anywhere;">${esc(it.from)} · ${esc(new Date(it.receivedAt).toLocaleString())}</div>
+              ${it.subject ? `<div style="font-size:13px;color:var(--color-neutral-700);overflow-wrap:anywhere;">${esc(it.subject)}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary" data-action="openInboxItem" data-id="${attr(it.id)}" ${blocked || state.inboxOpeningId ? 'disabled' : ''}>${state.inboxOpeningId === it.id ? 'Opening…' : 'Open'}</button>
+              ${state.inboxConfirmDismiss === it.id
+                ? `<button class="btn btn-secondary" data-action="dismissInboxItem" data-id="${attr(it.id)}">Yes, not an invoice</button><button class="btn btn-ghost" data-action="cancelDismissInboxItem">Keep</button>`
+                : `<button class="btn btn-ghost" data-action="confirmDismissInboxItem" data-id="${attr(it.id)}">Dismiss</button>`}
+            </div>
+          </div>
+        `).join('')}
       </div>
     `;
   }
@@ -959,8 +1018,8 @@
           ${isImage ? `<img src="${p.dataUrl}" style="width:100%;display:block;">` : ''}
           ${isPdf ? `<div style="padding:40px 12px;text-align:center;color:var(--color-neutral-700);">PDF uploaded — preview not shown</div>` : ''}
         </div>
-        <div style="margin-top:8px;font-size:13px;color:var(--color-neutral-700);">${esc(p.fileName)}</div>
-        <button class="btn btn-ghost btn-block" style="margin-top:16px;" data-action="cancelPending">Upload different file</button>
+        <div style="margin-top:8px;font-size:13px;color:var(--color-neutral-700);">${esc(p.fileName)}${p.inboxId ? ' · from email' : ''}</div>
+        <button class="btn btn-ghost btn-block" style="margin-top:16px;" data-action="cancelPending">${p.inboxId ? 'Back to email inbox' : 'Upload different file'}</button>
       </div>
       <div style="margin-top:32px;">
         ${p.extracting ? `<div class="tag tag-accent" style="margin-bottom:16px;">${esc(p.status || 'Reading invoice…')}</div>` : ''}
@@ -1990,6 +2049,39 @@
     `;
   }
 
+  function renderInboxSettings() {
+    const connected = state.inboxUrl && state.inboxKey;
+    const setupInfo = `Uses a small Google Apps Script (app/email-inbox/Code.gs in the project) running in the
+      Google account invoices are emailed to. Paste it into script.google.com, run "setup", then deploy it as a
+      web app (Execute as: Me, Who has access: Anyone). The full steps are in the project README under
+      "Emailing invoices in".`;
+    return `
+      <div class="card" style="padding:16px 20px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;">
+          <div class="card-title">${connected ? 'Connected' : 'Connect your invoice email'}</div>
+          ${infoIcon('inbox-setup', setupInfo)}
+        </div>
+        ${connected ? `
+          ${state.inboxAddress ? `<div style="margin-bottom:12px;">Email invoices to: <strong>${esc(state.inboxAddress)}</strong></div>` : ''}
+          <div style="margin-bottom:12px;color:var(--color-neutral-700);font-size:14px;line-height:1.5;">Saved with your data, so every device that loads it is connected too. Emailed invoices show up under Expenses → Email Inbox.</div>
+          ${state.storageMode === 'none' ? `<div style="margin-bottom:12px;padding:12px 16px;border:2px solid var(--color-accent);color:var(--color-accent-700);font-size:13px;">No storage location is set (Settings → Storage), so this connection is forgotten when the page is closed.</div>` : ''}
+          ${state.inboxError ? `<div style="color:var(--color-accent-700);font-size:13px;margin-bottom:12px;">${esc(state.inboxError)}</div>` : ''}
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-secondary" data-action="refreshInbox" ${state.inboxBusy ? 'disabled' : ''}>${state.inboxBusy ? 'Checking…' : 'Test connection'}</button>
+            <button class="btn btn-ghost" data-action="disconnectInbox">Disconnect</button>
+          </div>
+        ` : `
+          <div style="display:flex;flex-direction:column;gap:12px;">
+            <div class="field"><label>Web app URL</label><input class="input" id="inbox-url-draft" data-action="setInboxUrlDraft" data-on="input" value="${attr(state.inboxUrlDraft)}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+            <div class="field"><label>Access key</label><input class="input" id="inbox-key-draft" data-action="setInboxKeyDraft" data-on="input" value="${attr(state.inboxKeyDraft)}" placeholder="From the script's execution log"></div>
+            ${state.inboxError ? `<div style="color:var(--color-accent-700);font-size:13px;">${esc(state.inboxError)}</div>` : ''}
+            <div><button class="btn btn-primary" data-action="connectInbox" ${state.inboxBusy || !state.inboxUrlDraft.trim() || !state.inboxKeyDraft.trim() ? 'disabled' : ''}>${state.inboxBusy ? 'Connecting…' : 'Connect'}</button></div>
+          </div>
+        `}
+      </div>
+    `;
+  }
+
   function renderSettings() {
     const eqRows = [...state.equipment].sort((a, b) => alphaSort(a.name, b.name));
     const catBody = `
@@ -2043,6 +2135,7 @@
       { key: 'equipment', label: 'Equipment' },
       { key: 'suppliers', label: 'Suppliers' },
       { key: 'backup', label: 'Storage' },
+      { key: 'inbox', label: 'Email inbox' },
     ];
     const tab = TABS.some((t) => t.key === state.settingsTab) ? state.settingsTab : 'general';
 
@@ -2077,6 +2170,8 @@
       body = settingsSectionHeader('Categories', `<button class="btn btn-secondary" data-action="openCategoryAddModal">+ Add category</button>`) + catBody;
     } else if (tab === 'equipment') {
       body = settingsSectionHeader('Equipment', `<button class="btn btn-secondary" data-action="openAddEquipmentModal">+ Add equipment</button>`) + eqBody;
+    } else if (tab === 'inbox') {
+      body = settingsSectionHeader('Email inbox') + renderInboxSettings();
     } else if (tab === 'suppliers') {
       body = settingsSectionHeader('Suppliers', `<button class="btn btn-secondary" data-action="openSupplierAddModal">+ Add supplier</button>`) + supBody;
     } else {
@@ -2781,7 +2876,79 @@
       reader.readAsDataURL(file);
       e.target.value = '';
     },
-    cancelPending() { state.pendingInvoice = null; render(); },
+    cancelPending() {
+      if (state.pendingInvoice && state.pendingInvoice.inboxId) state.addExpenseMode = 'inbox';
+      state.pendingInvoice = null;
+      render();
+    },
+
+    refreshInbox() { refreshInbox(); },
+    async openInboxItem(e, d) {
+      if (state.pendingInvoice || state.inboxOpeningId) return;
+      state.inboxOpeningId = d.id;
+      state.inboxError = '';
+      render();
+      try {
+        const file = await EmailInbox.get(state.inboxUrl, state.inboxKey, d.id);
+        state.pendingInvoice = { fileName: file.fileName, dataUrl: file.dataUrl, mimeType: file.mimeType, inboxId: d.id, extracting: true, error: '', lineItems: [] };
+        state.addExpenseMode = 'upload';
+        state.inboxOpeningId = null;
+        render();
+        extractInvoice(file.dataUrl, file.mimeType);
+      } catch (err) {
+        state.inboxOpeningId = null;
+        state.inboxError = err.message;
+        render();
+      }
+    },
+    confirmDismissInboxItem(e, d) { state.inboxConfirmDismiss = d.id; render(); },
+    cancelDismissInboxItem() { state.inboxConfirmDismiss = null; render(); },
+    dismissInboxItem(e, d) {
+      state.inboxConfirmDismiss = null;
+      markInboxItemDone(d.id);
+    },
+    setInboxUrlDraft(e) { state.inboxUrlDraft = e.target.value; state.inboxError = ''; render(); },
+    setInboxKeyDraft(e) { state.inboxKeyDraft = e.target.value; state.inboxError = ''; render(); },
+    async connectInbox() {
+      const url = state.inboxUrlDraft.trim();
+      const key = state.inboxKeyDraft.trim();
+      if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) {
+        state.inboxError = 'That doesn\'t look like an Apps Script web app URL — it should start with https://script.google.com/macros/s/ and end in /exec.';
+        render();
+        return;
+      }
+      state.inboxBusy = true;
+      state.inboxError = '';
+      render();
+      try {
+        const data = await EmailInbox.list(url, key);
+        mutate(() => {
+          state.inboxUrl = url;
+          state.inboxKey = key;
+          state.inboxUrlDraft = '';
+          state.inboxKeyDraft = '';
+          state.inboxAddress = data.address || '';
+          state.inboxItems = data.items || [];
+          state.inboxLoaded = true;
+          persistDB();
+        });
+      } catch (err) {
+        state.inboxError = err.message;
+      }
+      state.inboxBusy = false;
+      render();
+    },
+    disconnectInbox() {
+      mutate(() => {
+        state.inboxUrl = '';
+        state.inboxKey = '';
+        state.inboxAddress = '';
+        state.inboxItems = [];
+        state.inboxLoaded = false;
+        state.inboxError = '';
+        persistDB();
+      });
+    },
     updatePendingItem(e, d) {
       const item = state.pendingInvoice.lineItems.find((it) => it.id === d.id);
       item[d.field] = e.target.value;
@@ -2808,6 +2975,7 @@
         state.pendingInvoice = null;
         state.view = 'history';
       });
+      if (p.inboxId && !state.pendingInvoice) markInboxItemDone(p.inboxId);
     },
 
     setEquipmentSearch(e) { state.equipmentSearch = e.target.value; render(); },
@@ -3019,6 +3187,38 @@
 
   Actions.setSettingsTab = (e, d) => { state.settingsTab = d.tab; render(); };
 
+  // Silent unless something's wrong: errors land in state.inboxError, shown on
+  // the Email Inbox tab and in Settings → Email inbox.
+  async function refreshInbox() {
+    if (!state.inboxUrl || !state.inboxKey || state.inboxBusy) return;
+    state.inboxBusy = true;
+    render();
+    try {
+      const data = await EmailInbox.list(state.inboxUrl, state.inboxKey);
+      state.inboxAddress = data.address || '';
+      state.inboxItems = data.items || [];
+      state.inboxError = '';
+    } catch (err) {
+      state.inboxError = err.message;
+    }
+    state.inboxLoaded = true;
+    state.inboxBusy = false;
+    render();
+  }
+
+  // Tells the script this attachment has been dealt with (saved or dismissed)
+  // so it's never offered again, on this device or any other.
+  async function markInboxItemDone(id) {
+    state.inboxItems = state.inboxItems.filter((it) => it.id !== id);
+    render();
+    try {
+      await EmailInbox.done(state.inboxUrl, state.inboxKey, id);
+    } catch (err) {
+      state.inboxError = 'Couldn\'t mark that email as handled, so it may show up in the inbox again: ' + err.message;
+      render();
+    }
+  }
+
   async function extractInvoice(dataUrl, mimeType) {
     const isPdf = mimeType === 'application/pdf';
     const setStatus = (status) => { if (state.pendingInvoice) { state.pendingInvoice.status = status; render(); } };
@@ -3133,6 +3333,7 @@
     state.loading = false;
     render();
     setInterval(autoSaveTick, 15000);
+    setInterval(() => { if (!document.hidden) refreshInbox(); }, 5 * 60 * 1000);
     // Non-blocking background sync: the dashboard is already showing
     // (empty) by the time this resolves, so whatever's in the configured
     // storage just populates it once it arrives — nothing gates the UI on

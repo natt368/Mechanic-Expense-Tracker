@@ -195,6 +195,61 @@ enough time has passed, since it re-checks permission for security. If the butto
 picks a folder doesn't appear at all, the browser doesn't support this feature — Google
 Drive is the alternative for anyone not on Chrome/Edge.
 
+## Emailing invoices in
+
+Invoices can be emailed straight into the app: forward a supplier's email, or email a
+photo from your phone, to **your address with `+invoices` added**. For example,
+`jane@example.com` becomes `jane+invoices@example.com`. Gmail and Google Workspace
+deliver that to the normal inbox, so nothing new has to be created. Each PDF or photo
+attachment then appears under **Expenses → Email Inbox**, with a count on the Expense
+button in the header. **Open** puts it through the same reader as Upload Invoice. Once
+it's saved, or **Dismiss**ed if it isn't an invoice, it's never offered again, on any
+device.
+
+The app is static, so it can't receive email itself. A small Google Apps Script
+(`app/email-inbox/Code.gs`), running in the Google account the invoices are emailed to,
+does that part. It reads matching emails from that Gmail and hands their attachments to
+the app; nothing is copied anywhere else. One-time setup:
+
+1. Sign in to the Google account invoices will be emailed to, and go to
+   [script.google.com](https://script.google.com) → **New project**.
+2. Delete the sample code, paste in the whole of `app/email-inbox/Code.gs`, and save
+   (name the project something like "Fleet invoice inbox").
+3. In the function dropdown at the top, pick **setup** and click **Run**. Approve the
+   permissions it asks for. Google warns that the app isn't verified, because it's your
+   own script: click **Advanced → Go to … (unsafe)**. The **Execution log** then shows
+   the address to email invoices to and an **access key**.
+4. Click **Deploy → New deployment**, choose type **Web app**, and set **Execute as: Me**
+   and **Who has access: Anyone**. Click **Deploy** and copy the **Web app URL** (it ends
+   in `/exec`).
+5. In the app, go to **Settings → Email inbox**, paste the URL and the access key, and
+   click **Connect**.
+
+The URL and key are saved with the rest of the data (in Drive or the local folder), so
+every device that loads that data is connected too. If no storage location is set,
+they're forgotten when the page closes.
+
+Notes:
+
+- **"Anyone" access** only means the web app URL can be called without a Google
+  sign-in. Every request still needs the access key, which only you and the app have. If
+  the key ever leaks, run **resetAccessKey** in the script editor and paste the new key
+  into Settings → Email inbox.
+- **Google Workspace accounts:** if "Anyone" isn't offered in step 4, your Workspace admin
+  has blocked web apps from being shared outside your organization. Ask them to allow it
+  for your account.
+- **Settings** at the top of `Code.gs`: `ADDRESS_TAG` (the `+invoices` part),
+  `ADDRESS_OVERRIDE` (use a specific address, such as a Workspace alias that delivers to
+  this account), `LOOKBACK_DAYS` (how far back to look, 120 by default), and
+  `MIN_IMAGE_BYTES` (images smaller than this are skipped as email-signature logos).
+- Imported threads get a Gmail label, **Fleet invoices/Imported**, so you can see in
+  Gmail what's been dealt with.
+- **After editing `Code.gs`,** publish the change with **Deploy → Manage deployments →
+  edit (pencil) → Version: New version → Deploy**. That keeps the same URL. A *new*
+  deployment would get a new URL, which would then need to go into Settings → Email inbox.
+- The app checks for new emails when it loads, every 5 minutes while it's open, and
+  whenever you click **Check for new**.
+
 ## Maintenance dashboard
 
 The top nav's **Maintenance** tab (next to Expense) rolls up every service interval on
