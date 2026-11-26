@@ -1,4 +1,4 @@
-// Email inbox — talks to the Google Apps Script web app in app/email-inbox/Code.gs,
+// Email inbox — talks to the Google Apps Script web app in app/public/email-inbox/Code.js,
 // which serves the PDF/photo attachments of invoices emailed to the account's
 // +invoices address. Plain GET requests (no custom headers), so the browser can
 // call the script cross-origin without a preflight.
@@ -42,7 +42,7 @@ const EmailInbox = (() => {
         throw new Error("Couldn't reach the Google script for AI reading.");
       }
       let data;
-      try { data = await res.json(); } catch (e) { throw new Error("The Google script didn't send a valid response — it may need redeploying with the latest Code.gs."); }
+      try { data = await res.json(); } catch (e) { throw new Error("The Google script didn't send a valid response — it may need redeploying with the latest script (Settings → Email & AI → Setup guide)."); }
       if (data.error === 'unauthorized') throw new Error('The email inbox access key is wrong.');
       if (data.error) throw new Error(data.error);
       return data;
