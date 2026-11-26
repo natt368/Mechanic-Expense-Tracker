@@ -28,5 +28,24 @@ const EmailInbox = (() => {
       return { fileName: data.fileName, mimeType: data.mimeType, dataUrl: 'data:' + data.mimeType + ';base64,' + data.data };
     },
     done(url, key, id) { return call(url, key, { action: 'done', id }); },
+    // AI invoice reading. A POST with a text/plain body is a "simple" request,
+    // so it also goes straight through without a CORS preflight.
+    async extract(url, key, { dataUrl, mimeType, inboxId, context }) {
+      let res;
+      try {
+        res = await fetch(url.trim(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ key, action: 'extract', inboxId: inboxId || '', context, file: { mimeType, data: dataUrl.split(',')[1] || '' } }),
+        });
+      } catch (e) {
+        throw new Error("Couldn't reach the Google script for AI reading.");
+      }
+      let data;
+      try { data = await res.json(); } catch (e) { throw new Error("The Google script didn't send a valid response — it may need redeploying with the latest Code.gs."); }
+      if (data.error === 'unauthorized') throw new Error('The email inbox access key is wrong.');
+      if (data.error) throw new Error(data.error);
+      return data;
+    },
   };
 })();

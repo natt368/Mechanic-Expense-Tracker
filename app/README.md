@@ -222,7 +222,7 @@ the app; nothing is copied anywhere else. One-time setup:
 4. Click **Deploy → New deployment**, choose type **Web app**, and set **Execute as: Me**
    and **Who has access: Anyone**. Click **Deploy** and copy the **Web app URL** (it ends
    in `/exec`).
-5. In the app, go to **Settings → Email inbox**, paste the URL and the access key, and
+5. In the app, go to **Settings → Email & AI**, paste the URL and the access key, and
    click **Connect**.
 
 The URL and key are saved with the rest of the data (in Drive or the local folder), so
@@ -234,7 +234,7 @@ Notes:
 - **"Anyone" access** only means the web app URL can be called without a Google
   sign-in. Every request still needs the access key, which only you and the app have. If
   the key ever leaks, run **resetAccessKey** in the script editor and paste the new key
-  into Settings → Email inbox.
+  into Settings → Email & AI.
 - **Google Workspace accounts:** if "Anyone" isn't offered in step 4, your Workspace admin
   has blocked web apps from being shared outside your organization. Ask them to allow it
   for your account.
@@ -246,9 +246,66 @@ Notes:
   Gmail what's been dealt with.
 - **After editing `Code.gs`,** publish the change with **Deploy → Manage deployments →
   edit (pencil) → Version: New version → Deploy**. That keeps the same URL. A *new*
-  deployment would get a new URL, which would then need to go into Settings → Email inbox.
+  deployment would get a new URL, which would then need to go into Settings → Email & AI.
 - The app checks for new emails when it loads, every 5 minutes while it's open, and
   whenever you click **Check for new**.
+
+## AI invoice reading and automatic coding
+
+This is optional. When it's on, every invoice, uploaded or emailed, is read by Claude
+(Anthropic's AI) instead of the basic built-in reader. Claude reads it line by line and
+suggests the **equipment** and **expense type** (Parts, Labour, Fuel, Freight, …) for each
+line, based on how you've coded past invoices.
+
+How the suggestions are made, strongest first:
+
+1. **Your own history, exactly.** If a part number (or, without one, the same description
+   from the same vendor) has only ever gone to one machine, it goes there again, and its
+   expense type is reused. This happens in the app itself, so it also works with AI off.
+2. **Claude's judgement**, given your equipment list (name, category, make/model, VIN,
+   notes), the expense types you use, up to 300 of your most recent coded lines, and, for
+   emailed invoices, the email's subject and text ("parts for the combine" counts).
+
+Every suggestion is shown on the review screen before anything is saved. Guesses worth
+checking are outlined in red, with a short reason underneath. Whatever you save becomes
+history, so corrections carry forward: there's no separate training step, and the app
+keeps getting better as you use it. Expense types are free text. The defaults are
+offered, plus any type you've used before, and **Reports → Expense types** totals
+spending by type.
+
+### Setting it up
+
+AI reading runs through the same Google Apps Script as the email inbox, which keeps the
+API key out of the public website. So set up the email inbox first (above), then:
+
+1. Create a Claude API key at [console.anthropic.com](https://console.anthropic.com)
+   (Settings → API keys). Usage is billed to that account. At the default settings,
+   expect roughly 5–10¢ per invoice, more for long multi-page ones.
+2. In the Apps Script editor, open **Project Settings** (gear icon) → **Script
+   properties** → **Add script property**. Name it `ANTHROPIC_API_KEY` and paste the key
+   as the value. Save.
+3. If your script was set up before AI reading existed, paste in the latest `Code.gs` and
+   publish it (**Deploy → Manage deployments → edit → Version: New version → Deploy**).
+   Run **setup** once more so Google asks for the new "connect to an external service"
+   permission.
+4. In the app, go to **Settings → Email & AI**, click **Test connection**, then
+   **Turn on AI reading**.
+
+Settings at the top of `Code.gs`:
+- `AI_MODEL` (default `claude-opus-5-5`, the most accurate). Cheaper options:
+  `claude-sonnet-5-5`, or `claude-haiku-5-5` (a fraction of a cent per invoice).
+- `AI_EFFORT` (`low` by default, the fastest). `medium` or `high` think harder about
+  messy invoices but take longer.
+- `AI_HISTORY_LINES` (300).
+
+If a request is declined by Anthropic's safety filters, it's retried automatically on
+Anthropic's recommended fallback model. If AI reading fails for any reason (no credit,
+network, a timeout), the app says why and falls back to the basic reader, so an invoice
+is never lost.
+
+Privacy: with AI reading on, each invoice file, your equipment list and recent coding
+history are sent to Anthropic's API to be read. With it off, nothing leaves your browser
+and Google account.
 
 ## Maintenance dashboard
 
