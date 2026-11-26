@@ -3,8 +3,11 @@
 
   const $app = document.getElementById('app');
 
-  const blankStandaloneRow = () => ({ part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), equipment: '', liters: '' });
-  const blankManualForm = () => ({ part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso() });
+  const blankStandaloneRow = () => ({ part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), equipment: '', liters: '', expenseType: '' });
+  const blankManualForm = () => ({ part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), expenseType: '' });
+  const blankPendingItem = () => ({ id: uid(), part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), equipment: '', liters: '', expenseType: '' });
+  // Offered in every "Type" field alongside whatever types have already been used.
+  const DEFAULT_EXPENSE_TYPES = ['Parts', 'Labour', 'Fuel', 'Oil & fluids', 'Filters', 'Tires', 'Freight', 'Shop supplies'];
   const COLOR_SWATCHES = ['oklch(60% 0.19 0)', 'oklch(60% 0.19 29)', 'oklch(60% 0.19 55)', 'oklch(60% 0.19 80)', 'oklch(60% 0.19 110)', 'oklch(60% 0.19 140)', 'oklch(60% 0.19 165)', 'oklch(60% 0.19 200)', 'oklch(60% 0.19 230)', 'oklch(60% 0.19 260)', 'oklch(60% 0.19 290)', 'oklch(60% 0.19 320)', 'oklch(60% 0.19 345)', 'oklch(45% 0.03 0)'];
   const DEFAULT_FARM_NAME = 'Veteran Equipment Expense';
 
@@ -75,6 +78,16 @@
 
     localFolderName: '', localLastSavedAt: null, localBusy: false, localMessage: '',
     localNeedsReconnect: false, localFolderChangeConfirming: false,
+
+    // Email inbox (Settings → Email & AI). URL + key are saved with the data, so
+    // every device that loads it is connected too.
+    inboxUrl: '', inboxKey: '', inboxUrlDraft: '', inboxKeyDraft: '',
+    inboxAddress: '', inboxItems: [], inboxLoaded: false, inboxBusy: false, inboxError: '',
+    inboxOpeningId: null, inboxConfirmDismiss: null,
+    // AI invoice reading runs through the same Google script. aiReading is the
+    // on/off switch (saved with the data); inboxAi is whether the script reports
+    // having a Claude API key (null until the first inbox check answers).
+    aiReading: false, inboxAi: null,
   };
 
   // ---------------------------------------------------------------- data store
@@ -94,6 +107,9 @@
     state.suppliers = [];
     state.invoices = [];
     state.settingsPassword = '1234';
+    state.inboxUrl = '';
+    state.inboxKey = '';
+    state.aiReading = false;
   }
 
   let dataDirty = false;
@@ -114,6 +130,13 @@
     state.invoices = Array.isArray(data.invoices) ? data.invoices : [];
     state.settingsPassword = typeof data.settingsPassword === 'string' && data.settingsPassword ? data.settingsPassword : '1234';
     state.farmName = typeof data.farmName === 'string' ? data.farmName : '';
+    const inbox = data.emailInbox && typeof data.emailInbox === 'object' ? data.emailInbox : {};
+    state.inboxUrl = typeof inbox.url === 'string' ? inbox.url : '';
+    state.inboxKey = typeof inbox.key === 'string' ? inbox.key : '';
+    state.aiReading = data.aiReading === true;
+    state.inboxItems = [];
+    state.inboxLoaded = false;
+    if (state.inboxUrl && state.inboxKey) setTimeout(() => refreshInbox(), 0);
     let maxId = 0;
     const scan = (v) => { if (v && typeof v.id === 'number' && v.id > maxId) maxId = v.id; };
     state.categories.forEach(scan);
@@ -464,6 +487,7 @@
           date: it.date || '',
           equipmentId: it.equipmentId,
           liters: it.liters || '',
+          expenseType: (it.expenseType || '').trim(),
         })),
       });
       persistDB();
@@ -496,6 +520,8 @@
       invoices: state.invoices,
       settingsPassword: state.settingsPassword,
       farmName: state.farmName,
+      emailInbox: state.inboxUrl ? { url: state.inboxUrl, key: state.inboxKey } : null,
+      aiReading: state.aiReading,
     };
   }
   function fmt(n) { return '$' + (parseFloat(n) || 0).toFixed(2); }
@@ -557,6 +583,15 @@
       out.push({ ...li, invoiceId: inv.id, fileName: inv.fileName, equipment: eq ? eq.name : '' });
     }));
     return out;
+  }
+  function expenseTypes() {
+    const seen = new Map();
+    DEFAULT_EXPENSE_TYPES.forEach((t) => seen.set(t.toLowerCase(), t));
+    state.invoices.forEach((inv) => inv.lineItems.forEach((li) => {
+      const t = (li.expenseType || '').trim();
+      if (t && !seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t);
+    }));
+    return [...seen.values()].sort(alphaSort);
   }
   function getYears() {
     const set = new Set([new Date().getFullYear()]);
@@ -622,6 +657,8 @@
     if (supList) supList.innerHTML = state.suppliers.map((s) => `<option value="${attr(s.name)}"></option>`).join('');
     const eqList = document.getElementById('equipmentDatalist');
     if (eqList) eqList.innerHTML = state.equipment.map((e) => `<option value="${attr(e.name)}"></option>`).join('');
+    const typeList = document.getElementById('expenseTypeList');
+    if (typeList) typeList.innerHTML = expenseTypes().map((t) => `<option value="${attr(t)}"></option>`).join('');
   }
 
   function renderRoot() {
@@ -691,7 +728,7 @@
         </div>
         <div style="display:flex;gap:10px;align-items:center;">
           ${navBtn('dashboard', 'Dashboard', v === 'dashboard', 'style="font-size:17px;padding:14px 22px;"')}
-          ${navBtn('upload', 'Expense', v === 'upload', 'style="font-size:17px;padding:14px 22px;"')}
+          ${navBtn('upload', 'Expense' + (state.inboxItems.length ? ` <span class="tag tag-accent" title="${state.inboxItems.length} emailed invoice${state.inboxItems.length === 1 ? '' : 's'} waiting" style="margin-left:6px;">${state.inboxItems.length}</span>` : ''), v === 'upload', 'style="font-size:17px;padding:14px 22px;"')}
           ${navBtn('maintenance', 'Maintenance', v === 'maintenance', 'style="font-size:15px;padding:14px 18px;"')}
           ${navBtn('history', 'Equipment', v === 'history' || v === 'detail', 'style="font-size:15px;padding:14px 18px;"')}
           ${navBtn('yearly', 'Reports', v === 'yearly', 'style="font-size:15px;padding:14px 18px;"')}
@@ -846,12 +883,56 @@
         <p class="text-muted" style="max-width:640px;">Upload an invoice to extract line items automatically, enter a single expense by hand, or browse everything you've logged.</p>
         <div style="display:flex;gap:8px;margin-bottom:28px;">
           <button class="btn ${mode === 'upload' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="upload">Upload Invoice</button>
+          <button class="btn ${mode === 'inbox' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="inbox">Email Inbox${state.inboxItems.length ? ` (${state.inboxItems.length})` : ''}</button>
           <button class="btn ${mode === 'manual' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="manual">Manual Expense</button>
           <button class="btn ${mode === 'all' ? 'btn-primary' : 'btn-ghost'}" data-action="setAddMode" data-mode="all">All Expenses</button>
         </div>
         ${mode === 'all' ? renderAllExpenses() : ''}
         ${mode === 'manual' ? renderManualExpense() : ''}
         ${mode === 'upload' ? renderUploadExpense() : ''}
+        ${mode === 'inbox' ? renderInbox() : ''}
+      </div>
+    `;
+  }
+
+  function renderInbox() {
+    if (!state.inboxUrl || !state.inboxKey) {
+      return `
+        <div class="card" style="padding:16px 20px;max-width:640px;">
+          <div class="card-title" style="margin-bottom:8px;">Email invoices in</div>
+          <div style="color:var(--color-neutral-700);font-size:14px;line-height:1.5;">
+            Not set up yet. Once it's connected in <strong>Settings → Email & AI</strong>, any invoice PDF or
+            photo emailed to your +invoices address shows up here, ready to read and assign to equipment.
+          </div>
+        </div>
+      `;
+    }
+    const items = state.inboxItems;
+    const blocked = !!state.pendingInvoice;
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px;">
+        <div>${state.inboxAddress ? `Email invoices to <strong>${esc(state.inboxAddress)}</strong>` : ''}</div>
+        <button class="btn btn-secondary" data-action="refreshInbox" ${state.inboxBusy ? 'disabled' : ''}>${state.inboxBusy ? 'Checking…' : 'Check for new'}</button>
+      </div>
+      ${state.inboxError ? `<div style="border:2px solid var(--color-accent);padding:12px;margin-bottom:16px;color:var(--color-accent-700);">${esc(state.inboxError)}</div>` : ''}
+      ${blocked && items.length ? `<div style="margin-bottom:16px;font-size:13px;color:var(--color-neutral-700);">Finish saving (or discard) the invoice open in Upload Invoice before opening another one.</div>` : ''}
+      ${!items.length && state.inboxLoaded && !state.inboxError ? `<div class="text-muted">No new emailed invoices.</div>` : ''}
+      <div style="display:flex;flex-direction:column;gap:8px;max-width:900px;">
+        ${items.map((it) => `
+          <div class="card" style="padding:12px 16px;display:flex;flex-direction:row;align-items:center;gap:16px;flex-wrap:wrap;">
+            <div style="flex:1 1 280px;min-width:0;">
+              <div class="card-title" style="font-size:15px;overflow-wrap:anywhere;">${esc(it.fileName)}</div>
+              <div class="card-meta" style="overflow-wrap:anywhere;">${esc(it.from)} · ${esc(new Date(it.receivedAt).toLocaleString())}</div>
+              ${it.subject ? `<div style="font-size:13px;color:var(--color-neutral-700);overflow-wrap:anywhere;">${esc(it.subject)}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary" data-action="openInboxItem" data-id="${attr(it.id)}" ${blocked || state.inboxOpeningId ? 'disabled' : ''}>${state.inboxOpeningId === it.id ? 'Opening…' : 'Open'}</button>
+              ${state.inboxConfirmDismiss === it.id
+                ? `<button class="btn btn-secondary" data-action="dismissInboxItem" data-id="${attr(it.id)}">Yes, not an invoice</button><button class="btn btn-ghost" data-action="cancelDismissInboxItem">Keep</button>`
+                : `<button class="btn btn-ghost" data-action="confirmDismissInboxItem" data-id="${attr(it.id)}">Dismiss</button>`}
+            </div>
+          </div>
+        `).join('')}
       </div>
     `;
   }
@@ -859,7 +940,7 @@
   function renderAllExpenses() {
     const term = state.allExpSearch.trim().toLowerCase();
     const lines = allLineItems();
-    const filtered = term ? lines.filter((li) => [li.part, li.partNumber, li.vendor, li.equipment, li.date].some((v) => (v || '').toLowerCase().includes(term))) : lines;
+    const filtered = term ? lines.filter((li) => [li.part, li.partNumber, li.vendor, li.equipment, li.expenseType, li.date].some((v) => (v || '').toLowerCase().includes(term))) : lines;
     const amt = (li) => parseFloat(li.totalCost) || 0;
     const sort = state.allExpSort;
     const sorted = [...filtered].sort((a, b) => {
@@ -872,7 +953,7 @@
     return `
       <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;margin-bottom:20px;">
         <div class="field" style="flex:1;min-width:280px;"><label>Search</label>
-          <input class="input" id="all-exp-search" data-action="setAllExpSearch" data-on="input" placeholder="Part, vendor, equipment, or date…" value="${attr(state.allExpSearch)}">
+          <input class="input" id="all-exp-search" data-action="setAllExpSearch" data-on="input" placeholder="Part, vendor, equipment, type, or date…" value="${attr(state.allExpSearch)}">
         </div>
         <div class="field" style="width:200px;"><label>Sort by</label>
           <select class="input" id="all-exp-sort" data-action="setAllExpSort" data-on="change">
@@ -885,9 +966,9 @@
         <div style="padding-bottom:8px;color:var(--color-neutral-700);font-size:13px;">${sorted.length}${sorted.length === 1 ? ' expense' : ' expenses'} · ${fmt(total)}</div>
       </div>
       <table class="table">
-        <thead><tr><th>Date</th><th>Part</th><th>Part&nbsp;#</th><th>Vendor</th><th>Equipment</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Total</th></tr></thead>
+        <thead><tr><th>Date</th><th>Part</th><th>Part&nbsp;#</th><th>Vendor</th><th>Equipment</th><th>Type</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Total</th></tr></thead>
         <tbody>
-          ${sorted.map((li) => `<tr><td style="white-space:nowrap;">${esc(li.date || '—')}</td><td>${esc(li.part || '—')}</td><td>${esc(li.partNumber || '—')}</td><td>${esc(li.vendor || '—')}</td><td>${esc(li.equipment || 'Unassigned')}</td><td style="text-align:right;">${esc(li.qty || '')}</td><td style="text-align:right;font-family:var(--font-heading);">${fmt(li.totalCost)}</td></tr>`).join('')}
+          ${sorted.map((li) => `<tr><td style="white-space:nowrap;">${esc(li.date || '—')}</td><td>${esc(li.part || '—')}</td><td>${esc(li.partNumber || '—')}</td><td>${esc(li.vendor || '—')}</td><td>${esc(li.equipment || 'Unassigned')}</td><td>${esc(li.expenseType || '—')}</td><td style="text-align:right;">${esc(li.qty || '')}</td><td style="text-align:right;font-family:var(--font-heading);">${fmt(li.totalCost)}</td></tr>`).join('')}
         </tbody>
       </table>
       ${sorted.length === 0 ? `<div class="text-muted" style="margin-top:16px;">${lines.length === 0 ? 'No expenses logged yet.' : 'No expenses match that search.'}</div>` : ''}
@@ -926,6 +1007,7 @@
               <label>Equipment</label>
               <input class="input" id="row-${i}-equipment" data-action="updateStandaloneRow" data-index="${i}" data-field="equipment" data-on="input" style="width:100%;" list="equipmentDatalist" placeholder="Start typing…" value="${attr(row.equipment)}">
             </div>
+            <div class="field"><label>Type</label><input class="input" id="row-${i}-expenseType" data-action="updateStandaloneRow" data-index="${i}" data-field="expenseType" data-on="input" style="width:140px" list="expenseTypeList" placeholder="e.g. Parts" value="${attr(row.expenseType)}"></div>
             <div class="field"><label>Fuel&nbsp;liters</label><input class="input" id="row-${i}-liters" data-action="updateStandaloneRow" data-index="${i}" data-field="liters" data-on="input" style="width:100px" type="number" step="0.01" placeholder="optional" value="${attr(row.liters)}"></div>
             ${rows.length > 1 ? trashButton('removeStandaloneRow', 'Remove row', `data-index="${i}"`) : ''}
           </div>
@@ -959,15 +1041,17 @@
           ${isImage ? `<img src="${p.dataUrl}" style="width:100%;display:block;">` : ''}
           ${isPdf ? `<div style="padding:40px 12px;text-align:center;color:var(--color-neutral-700);">PDF uploaded — preview not shown</div>` : ''}
         </div>
-        <div style="margin-top:8px;font-size:13px;color:var(--color-neutral-700);">${esc(p.fileName)}</div>
-        <button class="btn btn-ghost btn-block" style="margin-top:16px;" data-action="cancelPending">Upload different file</button>
+        <div style="margin-top:8px;font-size:13px;color:var(--color-neutral-700);">${esc(p.fileName)}${p.inboxId ? ' · from email' : ''}</div>
+        <button class="btn btn-ghost btn-block" style="margin-top:16px;" data-action="cancelPending">${p.inboxId ? 'Back to email inbox' : 'Upload different file'}</button>
       </div>
       <div style="margin-top:32px;">
         ${p.extracting ? `<div class="tag tag-accent" style="margin-bottom:16px;">${esc(p.status || 'Reading invoice…')}</div>` : ''}
+        ${!p.extracting && p.readBy === 'ai' ? `<div style="margin-bottom:16px;font-size:14px;color:var(--color-neutral-700);">Read by AI. Equipment and types are suggestions — lines outlined in red are guesses worth checking.</div>` : ''}
+        ${p.aiNote ? `<div style="border:2px solid var(--color-accent);padding:12px;margin-bottom:16px;color:var(--color-accent-700);">${esc(p.aiNote)}</div>` : ''}
         ${p.error ? `<div style="border:2px solid var(--color-accent);padding:12px;margin-bottom:16px;color:var(--color-accent-700);">${esc(p.error)}</div>` : ''}
         ${rows.length ? `
           <table class="table">
-            <thead><tr><th>Part</th><th>Part&nbsp;#</th><th>Qty</th><th>Unit&nbsp;Cost</th><th>Total&nbsp;Cost</th><th>Vendor</th><th>Date</th><th>Equipment</th><th>Fuel&nbsp;liters</th><th></th></tr></thead>
+            <thead><tr><th>Part</th><th>Part&nbsp;#</th><th>Qty</th><th>Unit&nbsp;Cost</th><th>Total&nbsp;Cost</th><th>Vendor</th><th>Date</th><th>Equipment</th><th>Type</th><th>Fuel&nbsp;liters</th><th></th></tr></thead>
             <tbody>
               ${rows.map((item) => `
                 <tr>
@@ -978,7 +1062,11 @@
                   <td><input class="input" id="pend-${item.id}-totalCost" data-action="updatePendingItem" data-id="${item.id}" data-field="totalCost" data-on="input" style="width:80px" type="number" value="${attr(item.totalCost)}"></td>
                   <td><input class="input" id="pend-${item.id}-vendor" data-action="updatePendingItem" data-id="${item.id}" data-field="vendor" data-on="input" style="width:130px" list="supplierList" value="${attr(item.vendor)}"></td>
                   <td><input class="input" id="pend-${item.id}-date" data-action="updatePendingItem" data-id="${item.id}" data-field="date" data-on="change" style="width:120px" type="date" value="${attr(item.date)}"></td>
-                  <td><input class="input" id="pend-${item.id}-equipment" data-action="updatePendingItem" data-id="${item.id}" data-field="equipment" data-on="input" style="width:160px" list="equipmentDatalist" placeholder="Start typing…" value="${attr(item.equipment)}"></td>
+                  <td style="vertical-align:top;">
+                    <input class="input" id="pend-${item.id}-equipment" data-action="updatePendingItem" data-id="${item.id}" data-field="equipment" data-on="input" style="width:160px;${suggestionNeedsCheck(item) ? 'border-color:var(--color-accent);' : ''}" list="equipmentDatalist" placeholder="Start typing…" value="${attr(item.equipment)}">
+                    ${suggestionHint(item)}
+                  </td>
+                  <td style="vertical-align:top;"><input class="input" id="pend-${item.id}-expenseType" data-action="updatePendingItem" data-id="${item.id}" data-field="expenseType" data-on="input" style="width:130px" list="expenseTypeList" placeholder="e.g. Parts" value="${attr(item.expenseType)}"></td>
                   <td><input class="input" id="pend-${item.id}-liters" data-action="updatePendingItem" data-id="${item.id}" data-field="liters" data-on="input" style="width:90px" type="number" step="0.01" placeholder="optional" value="${attr(item.liters)}"></td>
                   <td>${trashButton('removePendingItem', 'Remove line item', `data-id="${item.id}"`)}</td>
                 </tr>
@@ -1047,6 +1135,7 @@
             ${vendorQuickAdd(f.vendor, 'quickAddSupplierManual', '')}
           </div>
         </div>
+        <div class="field"><label>Type</label><input class="input" id="mf-expenseType" data-action="updateManualForm" data-field="expenseType" data-on="input" style="width:130px" list="expenseTypeList" placeholder="e.g. Parts" value="${attr(f.expenseType)}"></div>
         <div class="field"><label>Date</label><input class="input" id="mf-date" data-action="updateManualForm" data-field="date" data-on="change" style="width:130px" type="date" value="${attr(f.date)}"></div>
         <button class="btn btn-primary" data-action="saveManualExpense" data-id="${eq.id}" ${saveDisabled ? 'disabled' : ''}>Save expense</button>
         <button class="btn btn-ghost" data-action="closeManualForm">Cancel</button>
@@ -1612,6 +1701,7 @@
             <button class="btn ${mode === 'category' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="category">Categories</button>
             <button class="btn ${mode === 'equipment' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="equipment">Equipment</button>
             <button class="btn ${mode === 'vendor' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="vendor">Vendors</button>
+          <button class="btn ${mode === 'type' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="type">Expense types</button>
             <button class="btn ${mode === 'usage' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="usage">Usage</button>
           </div>
           ${renderYearlyUsage(selectedYear, years)}
@@ -1631,6 +1721,10 @@
       const agg = {};
       inYear.forEach((li) => { const v = (li.vendor || '').trim() || 'Unknown vendor'; agg[v] = (agg[v] || 0) + (parseFloat(li.totalCost) || 0); });
       source = Object.keys(agg).map((v) => ({ name: v, total: agg[v] }));
+    } else if (mode === 'type') {
+      const agg = {};
+      inYear.forEach((li) => { const t = (li.expenseType || '').trim() || 'No type'; agg[t] = (agg[t] || 0) + (parseFloat(li.totalCost) || 0); });
+      source = Object.keys(agg).map((t) => ({ name: t, total: agg[t] }));
     } else {
       source = state.equipment.map((eq) => ({
         name: eq.name, category: eq.category, make: eq.make, model: eq.model,
@@ -1650,8 +1744,8 @@
 
     const maxVal = Math.max(1, ...filtered.map((r) => r.total));
     const grandTotal = filtered.reduce((s, r) => s + r.total, 0);
-    const identityLabel = mode === 'category' ? 'Category' : mode === 'vendor' ? 'Vendor' : 'Equipment';
-    const placeholder = mode === 'equipment' ? 'Search by name, make, or model…' : mode === 'category' ? 'Search categories…' : 'Search vendors…';
+    const identityLabel = mode === 'category' ? 'Category' : mode === 'vendor' ? 'Vendor' : mode === 'type' ? 'Expense type' : 'Equipment';
+    const placeholder = mode === 'equipment' ? 'Search by name, make, or model…' : mode === 'category' ? 'Search categories…' : mode === 'type' ? 'Search expense types…' : 'Search vendors…';
 
     return `
       <div style="padding:40px 32px;max-width:900px;width:100%;margin:0 auto;box-sizing:border-box;">
@@ -1663,6 +1757,7 @@
           <button class="btn ${mode === 'category' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="category">Categories</button>
           <button class="btn ${mode === 'equipment' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="equipment">Equipment</button>
           <button class="btn ${mode === 'vendor' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="vendor">Vendors</button>
+          <button class="btn ${mode === 'type' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="type">Expense types</button>
           <button class="btn ${mode === 'usage' ? 'btn-primary' : 'btn-ghost'}" data-action="setYearlyMode" data-mode="usage">Usage</button>
         </div>
         <input class="input" id="yearly-search" data-action="setYearlySearch" data-on="input" style="width:100%;margin-bottom:20px;" placeholder="${placeholder}" value="${attr(state.yearlySearch)}">
@@ -1990,6 +2085,72 @@
     `;
   }
 
+  function renderInboxSettings() {
+    const connected = state.inboxUrl && state.inboxKey;
+    const setupInfo = `Uses a small Google Apps Script (app/email-inbox/Code.gs in the project) running in the
+      Google account invoices are emailed to. Paste it into script.google.com, run "setup", then deploy it as a
+      web app (Execute as: Me, Who has access: Anyone). The full steps are in the project README under
+      "Emailing invoices in".`;
+    return `
+      <div class="card" style="padding:16px 20px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;">
+          <div class="card-title">${connected ? 'Connected' : 'Connect your invoice email'}</div>
+          ${infoIcon('inbox-setup', setupInfo)}
+        </div>
+        ${connected ? `
+          ${state.inboxAddress ? `<div style="margin-bottom:12px;">Email invoices to: <strong>${esc(state.inboxAddress)}</strong></div>` : ''}
+          <div style="margin-bottom:12px;color:var(--color-neutral-700);font-size:14px;line-height:1.5;">Saved with your data, so every device that loads it is connected too. Emailed invoices show up under Expenses → Email Inbox.</div>
+          ${state.storageMode === 'none' ? `<div style="margin-bottom:12px;padding:12px 16px;border:2px solid var(--color-accent);color:var(--color-accent-700);font-size:13px;">No storage location is set (Settings → Storage), so this connection is forgotten when the page is closed.</div>` : ''}
+          ${state.inboxError ? `<div style="color:var(--color-accent-700);font-size:13px;margin-bottom:12px;">${esc(state.inboxError)}</div>` : ''}
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-secondary" data-action="refreshInbox" ${state.inboxBusy ? 'disabled' : ''}>${state.inboxBusy ? 'Checking…' : 'Test connection'}</button>
+            <button class="btn btn-ghost" data-action="disconnectInbox">Disconnect</button>
+          </div>
+        ` : `
+          <div style="display:flex;flex-direction:column;gap:12px;">
+            <div class="field"><label>Web app URL</label><input class="input" id="inbox-url-draft" data-action="setInboxUrlDraft" data-on="input" value="${attr(state.inboxUrlDraft)}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+            <div class="field"><label>Access key</label><input class="input" id="inbox-key-draft" data-action="setInboxKeyDraft" data-on="input" value="${attr(state.inboxKeyDraft)}" placeholder="From the script's execution log"></div>
+            ${state.inboxError ? `<div style="color:var(--color-accent-700);font-size:13px;">${esc(state.inboxError)}</div>` : ''}
+            <div><button class="btn btn-primary" data-action="connectInbox" ${state.inboxBusy || !state.inboxUrlDraft.trim() || !state.inboxKeyDraft.trim() ? 'disabled' : ''}>${state.inboxBusy ? 'Connecting…' : 'Connect'}</button></div>
+          </div>
+        `}
+      </div>
+    `;
+  }
+
+  function renderAiSettings() {
+    const connected = state.inboxUrl && state.inboxKey;
+    const info = `When this is on, uploaded and emailed invoices are sent to Claude (Anthropic's AI) through your
+      Google script. It reads every line, and suggests the equipment and expense type for each one from your
+      equipment list and how you've coded past invoices. Parts you've bought before go to the same machine as
+      last time automatically. Every suggestion is shown for you to check before saving, and what you save becomes
+      the history the next invoice learns from. Each invoice costs a few cents on your Anthropic account.`;
+    let bodyHtml;
+    if (!connected) {
+      bodyHtml = `<div style="color:var(--color-neutral-700);font-size:14px;line-height:1.5;">Connect the email inbox above first. AI reading runs through the same Google script.</div>`;
+    } else if (state.inboxAi === false) {
+      bodyHtml = `<div style="color:var(--color-neutral-700);font-size:14px;line-height:1.5;">
+        The Google script doesn't have a Claude API key yet. In the script editor, open <strong>Project Settings → Script properties</strong>,
+        add one named <strong>ANTHROPIC_API_KEY</strong> with your key from console.anthropic.com, then click <strong>Test connection</strong> above.
+        (If you set the script up before AI reading existed, paste in the latest Code.gs and deploy a new version first.)
+      </div>`;
+    } else {
+      bodyHtml = `
+        <div style="margin-bottom:12px;">AI reading is <strong>${state.aiReading ? 'on' : 'off'}</strong>${state.aiReading ? '. Invoices are read by Claude, with equipment and expense types suggested from your history.' : '. Invoices use the basic built-in reader, which still fills in equipment for parts you\'ve bought before.'}</div>
+        <button class="btn ${state.aiReading ? 'btn-ghost' : 'btn-primary'}" data-action="toggleAiReading">${state.aiReading ? 'Turn off' : 'Turn on AI reading'}</button>
+      `;
+    }
+    return `
+      <div class="card" style="padding:16px 20px;margin-top:16px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;">
+          <div class="card-title">AI invoice reading</div>
+          ${infoIcon('ai-reading', info)}
+        </div>
+        ${bodyHtml}
+      </div>
+    `;
+  }
+
   function renderSettings() {
     const eqRows = [...state.equipment].sort((a, b) => alphaSort(a.name, b.name));
     const catBody = `
@@ -2043,6 +2204,7 @@
       { key: 'equipment', label: 'Equipment' },
       { key: 'suppliers', label: 'Suppliers' },
       { key: 'backup', label: 'Storage' },
+      { key: 'inbox', label: 'Email & AI' },
     ];
     const tab = TABS.some((t) => t.key === state.settingsTab) ? state.settingsTab : 'general';
 
@@ -2077,6 +2239,8 @@
       body = settingsSectionHeader('Categories', `<button class="btn btn-secondary" data-action="openCategoryAddModal">+ Add category</button>`) + catBody;
     } else if (tab === 'equipment') {
       body = settingsSectionHeader('Equipment', `<button class="btn btn-secondary" data-action="openAddEquipmentModal">+ Add equipment</button>`) + eqBody;
+    } else if (tab === 'inbox') {
+      body = settingsSectionHeader('Email inbox') + renderInboxSettings() + renderAiSettings();
     } else if (tab === 'suppliers') {
       body = settingsSectionHeader('Suppliers', `<button class="btn btn-secondary" data-action="openSupplierAddModal">+ Add supplier</button>`) + supBody;
     } else {
@@ -2759,7 +2923,7 @@
     saveAllStandalone() {
       const validRows = state.standaloneRows.filter((r) => r.part.trim() && equipmentByName(r.equipment));
       if (!validRows.length) return;
-      const lineItems = validRows.map((r) => ({ part: r.part, partNumber: r.partNumber, qty: r.qty, unitCost: r.unitCost, totalCost: r.totalCost, vendor: r.vendor, date: r.date, equipmentId: equipmentByName(r.equipment).id, liters: r.liters }));
+      const lineItems = validRows.map((r) => ({ part: r.part, partNumber: r.partNumber, qty: r.qty, unitCost: r.unitCost, totalCost: r.totalCost, vendor: r.vendor, date: r.date, equipmentId: equipmentByName(r.equipment).id, liters: r.liters, expenseType: r.expenseType }));
       mutate(() => {
         Store.saveInvoice({ fileName: 'Manual entry', lineItems });
         state.standaloneRows = [blankStandaloneRow()];
@@ -2781,10 +2945,91 @@
       reader.readAsDataURL(file);
       e.target.value = '';
     },
-    cancelPending() { state.pendingInvoice = null; render(); },
+    cancelPending() {
+      if (state.pendingInvoice && state.pendingInvoice.inboxId) state.addExpenseMode = 'inbox';
+      state.pendingInvoice = null;
+      render();
+    },
+
+    refreshInbox() { refreshInbox(); },
+    async openInboxItem(e, d) {
+      if (state.pendingInvoice || state.inboxOpeningId) return;
+      state.inboxOpeningId = d.id;
+      state.inboxError = '';
+      render();
+      try {
+        const file = await EmailInbox.get(state.inboxUrl, state.inboxKey, d.id);
+        state.pendingInvoice = { fileName: file.fileName, dataUrl: file.dataUrl, mimeType: file.mimeType, inboxId: d.id, extracting: true, error: '', lineItems: [] };
+        state.addExpenseMode = 'upload';
+        state.inboxOpeningId = null;
+        render();
+        extractInvoice(file.dataUrl, file.mimeType);
+      } catch (err) {
+        state.inboxOpeningId = null;
+        state.inboxError = err.message;
+        render();
+      }
+    },
+    confirmDismissInboxItem(e, d) { state.inboxConfirmDismiss = d.id; render(); },
+    cancelDismissInboxItem() { state.inboxConfirmDismiss = null; render(); },
+    dismissInboxItem(e, d) {
+      state.inboxConfirmDismiss = null;
+      markInboxItemDone(d.id);
+    },
+    setInboxUrlDraft(e) { state.inboxUrlDraft = e.target.value; state.inboxError = ''; render(); },
+    setInboxKeyDraft(e) { state.inboxKeyDraft = e.target.value; state.inboxError = ''; render(); },
+    async connectInbox() {
+      const url = state.inboxUrlDraft.trim();
+      const key = state.inboxKeyDraft.trim();
+      if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) {
+        state.inboxError = 'That doesn\'t look like an Apps Script web app URL — it should start with https://script.google.com/macros/s/ and end in /exec.';
+        render();
+        return;
+      }
+      state.inboxBusy = true;
+      state.inboxError = '';
+      render();
+      try {
+        const data = await EmailInbox.list(url, key);
+        mutate(() => {
+          state.inboxUrl = url;
+          state.inboxKey = key;
+          state.inboxUrlDraft = '';
+          state.inboxKeyDraft = '';
+          state.inboxAddress = data.address || '';
+          state.inboxItems = data.items || [];
+          state.inboxAi = !!data.ai;
+          state.inboxLoaded = true;
+          persistDB();
+        });
+      } catch (err) {
+        state.inboxError = err.message;
+      }
+      state.inboxBusy = false;
+      render();
+    },
+    toggleAiReading() {
+      mutate(() => {
+        state.aiReading = !state.aiReading;
+        persistDB();
+      });
+    },
+    disconnectInbox() {
+      mutate(() => {
+        state.inboxUrl = '';
+        state.inboxKey = '';
+        state.inboxAddress = '';
+        state.inboxItems = [];
+        state.inboxLoaded = false;
+        state.inboxError = '';
+        state.inboxAi = null;
+        persistDB();
+      });
+    },
     updatePendingItem(e, d) {
       const item = state.pendingInvoice.lineItems.find((it) => it.id === d.id);
       item[d.field] = e.target.value;
+      if (d.field === 'equipment') item.suggestion = null;
       if (d.field === 'qty' || d.field === 'unitCost') {
         const qty = parseFloat(d.field === 'qty' ? e.target.value : item.qty) || 0;
         const unitCost = parseFloat(d.field === 'unitCost' ? e.target.value : item.unitCost) || 0;
@@ -2797,17 +3042,18 @@
       render();
     },
     addPendingRow() {
-      state.pendingInvoice.lineItems.push({ id: uid(), part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), equipment: '', liters: '' });
+      state.pendingInvoice.lineItems.push(blankPendingItem());
       render();
     },
     saveInvoice() {
       const p = state.pendingInvoice;
-      const lineItems = p.lineItems.map((it) => ({ part: it.part, partNumber: it.partNumber, qty: it.qty, unitCost: it.unitCost, totalCost: it.totalCost, vendor: it.vendor, date: it.date, equipmentId: (equipmentByName(it.equipment) || {}).id, liters: it.liters }));
+      const lineItems = p.lineItems.map((it) => ({ part: it.part, partNumber: it.partNumber, qty: it.qty, unitCost: it.unitCost, totalCost: it.totalCost, vendor: it.vendor, date: it.date, equipmentId: (equipmentByName(it.equipment) || {}).id, liters: it.liters, expenseType: it.expenseType }));
       mutate(() => {
         Store.saveInvoice({ fileName: p.fileName, lineItems });
         state.pendingInvoice = null;
         state.view = 'history';
       });
+      if (p.inboxId && !state.pendingInvoice) markInboxItemDone(p.inboxId);
     },
 
     setEquipmentSearch(e) { state.equipmentSearch = e.target.value; render(); },
@@ -3019,9 +3265,179 @@
 
   Actions.setSettingsTab = (e, d) => { state.settingsTab = d.tab; render(); };
 
+  // ---------------------------------------------------------------- coding predictions
+  // "Learning" is just the saved history: every invoice line you save with an
+  // equipment and type assigned becomes an example the next invoice is coded
+  // from — exactly here for parts bought before, and as examples sent to the AI.
+
+  function normPartNumber(s) { return (s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+  function normText(s) { return (s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+
+  function codedHistory() {
+    return allLineItems().filter((li) => li.equipment).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id - a.id);
+  }
+
+  // Past lines for the same part: by part number when there is one, otherwise by
+  // identical description from the same vendor.
+  function historyMatch(item, history) {
+    const pn = normPartNumber(item.partNumber);
+    let matches = pn.length >= 3 ? history.filter((li) => normPartNumber(li.partNumber) === pn) : [];
+    let basis = 'part #';
+    if (!matches.length && normText(item.part)) {
+      const desc = normText(item.part);
+      const vendor = normText(item.vendor);
+      matches = history.filter((li) => normText(li.part) === desc && (!vendor || normText(li.vendor) === vendor));
+      basis = 'part';
+    }
+    if (!matches.length) return null;
+    const equipment = [...new Set(matches.map((m) => m.equipment))];
+    const typed = matches.find((m) => (m.expenseType || '').trim());
+    return { equipment, expenseType: typed ? typed.expenseType.trim() : '', basis };
+  }
+
+  // Fills in equipment/type from history where it's unambiguous, and records
+  // where each suggestion came from so the table can show it.
+  function applyPredictions(rows) {
+    const history = codedHistory();
+    rows.forEach((row) => {
+      const h = historyMatch(row, history);
+      const aiEquipment = equipmentByName(row.equipment);
+      row.equipment = aiEquipment ? aiEquipment.name : '';
+      if (h && h.equipment.length === 1 && equipmentByName(h.equipment[0])) {
+        row.equipment = h.equipment[0];
+        row.suggestion = { source: 'history', confidence: 'high', reason: `Same ${h.basis} went to ${h.equipment[0]} before` };
+      } else if (row.ai && row.equipment) {
+        const also = h ? ` (bought before for ${h.equipment.join(', ')})` : '';
+        row.suggestion = { source: 'ai', confidence: row.ai.confidence, reason: (row.ai.reason || '') + also };
+      } else if (h) {
+        row.suggestion = { source: 'none', confidence: 'low', reason: `Bought before for ${h.equipment.join(', ')}` };
+      } else if (row.ai) {
+        row.suggestion = { source: 'ai', confidence: 'low', reason: row.ai.reason || 'No match found' };
+      }
+      if (h && h.expenseType) row.expenseType = h.expenseType;
+      else if (row.expenseType) {
+        const known = expenseTypes().find((t) => t.toLowerCase() === row.expenseType.trim().toLowerCase());
+        if (known) row.expenseType = known;
+      }
+      delete row.ai;
+    });
+    return rows;
+  }
+
+  function suggestionNeedsCheck(item) {
+    const sg = item.suggestion;
+    return !!sg && (sg.confidence === 'low' || (sg.source === 'ai' && sg.confidence === 'medium') || !item.equipment);
+  }
+
+  function suggestionHint(item) {
+    const sg = item.suggestion;
+    if (!sg) return '';
+    const label = sg.source === 'history' ? 'From your history' : sg.source === 'ai' ? `AI guess · ${sg.confidence}` : 'Check this one';
+    return `<div title="${attr(sg.reason)}" style="font-size:11px;line-height:1.3;margin-top:4px;max-width:160px;color:${suggestionNeedsCheck(item) ? 'var(--color-accent-700)' : 'var(--color-neutral-700)'};">${esc(label)}${sg.reason ? ` — ${esc(sg.reason)}` : ''}</div>`;
+  }
+
+  // What the AI gets to learn from: the equipment list, the expense types in use,
+  // and past lines (deduplicated, most recent first).
+  function aiContext() {
+    const seen = new Set();
+    const history = [];
+    for (const li of codedHistory()) {
+      const k = [normText(li.part), normPartNumber(li.partNumber), normText(li.vendor), li.equipment, normText(li.expenseType)].join('|');
+      if (seen.has(k)) continue;
+      seen.add(k);
+      history.push({ part: li.part, partNumber: li.partNumber, vendor: li.vendor, equipment: li.equipment, expenseType: li.expenseType || '' });
+      if (history.length >= 300) break;
+    }
+    return {
+      equipment: state.equipment.map((e) => ({ name: e.name, category: e.category, details: [e.make, e.model, e.vin ? 'VIN ' + e.vin : '', e.info].filter(Boolean).join(' ') })),
+      expenseTypes: expenseTypes(),
+      history,
+    };
+  }
+
+  function aiReadingReady() {
+    return state.aiReading && state.inboxUrl && state.inboxKey && state.inboxAi !== false;
+  }
+
+  function matchSupplier(name) {
+    const t = normText(name);
+    if (!t) return '';
+    const exact = state.suppliers.find((s) => normText(s.name) === t);
+    if (exact) return exact.name;
+    const close = state.suppliers.find((s) => { const n = normText(s.name); return n.length >= 4 && (t.includes(n) || n.includes(t)); });
+    return close ? close.name : name.trim();
+  }
+
+  function amountStr(n) {
+    return typeof n === 'number' && isFinite(n) && n !== 0 ? String(+n.toFixed(4)) : '';
+  }
+
+  // Silent unless something's wrong: errors land in state.inboxError, shown on
+  // the Email Inbox tab and in Settings → Email & AI.
+  async function refreshInbox() {
+    if (!state.inboxUrl || !state.inboxKey || state.inboxBusy) return;
+    state.inboxBusy = true;
+    render();
+    try {
+      const data = await EmailInbox.list(state.inboxUrl, state.inboxKey);
+      state.inboxAddress = data.address || '';
+      state.inboxItems = data.items || [];
+      state.inboxAi = !!data.ai;
+      state.inboxError = '';
+    } catch (err) {
+      state.inboxError = err.message;
+    }
+    state.inboxLoaded = true;
+    state.inboxBusy = false;
+    render();
+  }
+
+  // Tells the script this attachment has been dealt with (saved or dismissed)
+  // so it's never offered again, on this device or any other.
+  async function markInboxItemDone(id) {
+    state.inboxItems = state.inboxItems.filter((it) => it.id !== id);
+    render();
+    try {
+      await EmailInbox.done(state.inboxUrl, state.inboxKey, id);
+    } catch (err) {
+      state.inboxError = 'Couldn\'t mark that email as handled, so it may show up in the inbox again: ' + err.message;
+      render();
+    }
+  }
+
   async function extractInvoice(dataUrl, mimeType) {
     const isPdf = mimeType === 'application/pdf';
     const setStatus = (status) => { if (state.pendingInvoice) { state.pendingInvoice.status = status; render(); } };
+    let aiNote = '';
+    if (aiReadingReady()) {
+      const p = state.pendingInvoice;
+      setStatus('Reading the invoice with AI…');
+      try {
+        const r = await EmailInbox.extract(state.inboxUrl, state.inboxKey, { dataUrl, mimeType, inboxId: p && p.inboxId, context: aiContext() });
+        if (state.pendingInvoice !== p) return;
+        const date = /^\d{4}-\d{2}-\d{2}$/.test(r.invoiceDate || '') ? r.invoiceDate : todayIso();
+        const vendor = matchSupplier(r.vendor || '');
+        const rows = (r.lineItems || []).map((it) => ({
+          ...blankPendingItem(),
+          part: it.part || '', partNumber: it.partNumber || '',
+          qty: amountStr(it.qty) || '1', unitCost: amountStr(it.unitCost), totalCost: amountStr(it.totalCost),
+          liters: it.liters > 0 ? amountStr(it.liters) : '',
+          vendor, date, equipment: it.equipment || '', expenseType: (it.expenseType || '').trim(),
+          ai: { confidence: it.confidence, reason: it.reason },
+        }));
+        p.extracting = false;
+        p.status = '';
+        p.readBy = 'ai';
+        p.error = rows.length ? '' : 'The AI found no line items on this invoice. Add them by hand below.';
+        p.lineItems = rows.length ? applyPredictions(rows) : [blankPendingItem()];
+        render();
+        return;
+      } catch (err) {
+        if (state.pendingInvoice !== p) return;
+        aiNote = 'AI reading failed, so the basic reader was used instead: ' + err.message;
+      }
+    }
+    if (state.pendingInvoice) state.pendingInvoice.aiNote = aiNote;
     setStatus(isPdf ? 'Reading the PDF text…' : 'Scanning the image (OCR)…');
     try {
       const text = await InvoiceParser.readInvoiceText(dataUrl, mimeType, (p) => {
@@ -3029,12 +3445,12 @@
       });
       setStatus('Finding line items…');
       const { items } = InvoiceParser.parseInvoiceLines(text);
-      const rows = items.map((it) => ({ part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), liters: '', ...it, id: uid(), equipment: '' }));
+      const rows = items.map((it) => ({ ...blankPendingItem(), ...it, id: uid(), equipment: '' }));
       if (state.pendingInvoice) {
         state.pendingInvoice.extracting = false;
         state.pendingInvoice.status = '';
         state.pendingInvoice.error = rows.length ? '' : 'No line items were recognized on this invoice. Add them by hand below — the vendor and date fields are yours to fill in.';
-        state.pendingInvoice.lineItems = rows.length ? rows : [{ id: uid(), part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), equipment: '', liters: '' }];
+        state.pendingInvoice.lineItems = rows.length ? applyPredictions(rows) : [blankPendingItem()];
       }
     } catch (err) {
       const scanned = err && err.message === 'SCANNED_PDF';
@@ -3044,7 +3460,7 @@
         state.pendingInvoice.error = scanned
           ? 'This PDF is a scan with no text layer, so there is nothing to read directly. Save the page as a JPG or PNG and upload that instead, or enter the lines by hand below.'
           : 'Could not read this invoice automatically. Add line items manually below.';
-        state.pendingInvoice.lineItems = [{ id: uid(), part: '', partNumber: '', qty: '1', unitCost: '', totalCost: '', vendor: '', date: todayIso(), equipment: '', liters: '' }];
+        state.pendingInvoice.lineItems = [blankPendingItem()];
       }
     }
     render();
@@ -3133,6 +3549,7 @@
     state.loading = false;
     render();
     setInterval(autoSaveTick, 15000);
+    setInterval(() => { if (!document.hidden) refreshInbox(); }, 5 * 60 * 1000);
     // Non-blocking background sync: the dashboard is already showing
     // (empty) by the time this resolves, so whatever's in the configured
     // storage just populates it once it arrives — nothing gates the UI on
